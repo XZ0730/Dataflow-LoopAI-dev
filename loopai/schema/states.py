@@ -424,6 +424,12 @@ class JudgerState(BaseModel):
         description="评估模型 Top P",
         json_schema_extra={"ui_type": "slider", "max": 1, "ui_group": "评估模型"}
     )
+    eval_enable_thinking: Optional[bool] = Field(
+        default=None,
+        title="评估模型思考模式",
+        description="是否开启评估模型的思考模式（如 Qwen3 的 enable_thinking）。不设置时跟随模型默认；设为 True/False 会通过 chat_template_kwargs 显式开启/关闭。",
+        json_schema_extra={"ui_type": "toggle_switch", "ui_group": "评估模型"}
+    )
     # eval_format_type: str = Field(
     #    default=None,
     #    title="评估模型问题格式化类型",

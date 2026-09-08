@@ -15,8 +15,9 @@ logger = get_logger()
 
 
 def _init_model(model_path: str, base_url: str, api_key: str,
-                temperature: float = 0, top_p: float = 0.95):
-    return ChatOpenAI(
+                temperature: float = 0, top_p: float = 0.95,
+                enable_thinking=None):
+    kwargs = dict(
         model=model_path,
         api_key=api_key,
         base_url=base_url,
@@ -24,6 +25,9 @@ def _init_model(model_path: str, base_url: str, api_key: str,
         top_p=top_p,
         max_tokens=16384,
     )
+    if enable_thinking is not None:
+        kwargs["extra_body"] = {"chat_template_kwargs": {"enable_thinking": bool(enable_thinking)}}
+    return ChatOpenAI(**kwargs)
 
 
 def run_generate_code(state: Dict[str, Any], writer) -> str:
@@ -37,6 +41,7 @@ def run_generate_code(state: Dict[str, Any], writer) -> str:
         api_key=judger_state.get("eval_api_key", "EMPTY"),
         temperature=judger_state["eval_temperature"],
         top_p=judger_state["eval_top_p"],
+        enable_thinking=judger_state.get("eval_enable_thinking"),
     )
     logger.info(f"模型路径:-> base_url: {judger_state['eval_base_url']}")
 
@@ -111,6 +116,7 @@ def run_generate_text2sql(state: Dict[str, Any], writer) -> str:
         api_key="EMPTY",
         temperature=judger_state["eval_temperature"],
         top_p=judger_state["eval_top_p"],
+        enable_thinking=judger_state.get("eval_enable_thinking"),
     )
 
     output_dir = Path(state.get("output_dir"))

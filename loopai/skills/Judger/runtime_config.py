@@ -85,6 +85,10 @@ def resolve_judger_runtime_config(
         judger.get("cuda_visible_devices"),
         _SCHEMA_DEFAULTS["cuda_visible_devices"],
     )
+    enable_thinking = _first_non_empty(
+        os.getenv("JUDGER_ENABLE_THINKING"),
+        judger.get("eval_enable_thinking"),
+    )
 
     # --- global ---
     resolved_task_id = _first_non_empty(
@@ -124,6 +128,8 @@ def resolve_judger_runtime_config(
         gpu_memory_utilization = float(gpu_memory_utilization) if gpu_memory_utilization is not None else 0.9
     except (TypeError, ValueError):
         gpu_memory_utilization = 0.9
+    if enable_thinking is not None and not isinstance(enable_thinking, bool):
+        enable_thinking = str(enable_thinking).strip().lower() in ("true", "1", "on", "yes")
 
     # --- write resolved values back into state ---
     if is_state_dict:
@@ -140,6 +146,7 @@ def resolve_judger_runtime_config(
             ("eval_vllm_tensor_parallel_size", tensor_parallel_size),
             ("eval_vllm_gpu_memory_utilization", gpu_memory_utilization),
             ("cuda_visible_devices", cuda_visible_devices),
+            ("eval_enable_thinking", enable_thinking),
         ):
             if val is not None:
                 state["judger"][key] = val
@@ -158,4 +165,5 @@ def resolve_judger_runtime_config(
         "tensor_parallel_size": tensor_parallel_size,
         "gpu_memory_utilization": gpu_memory_utilization,
         "cuda_visible_devices": str(cuda_visible_devices),
+        "enable_thinking": enable_thinking,
     }

@@ -59,6 +59,7 @@ loopai-judger --from-step generate   # 从指定步骤开始
 | `eval_model_path` | - | 被评测模型路径；为空时尝试从 trainer checkpoint 推断 | `JUDGER_MODEL_PATH` |
 | `eval_temperature` | `0` | 模型温度 | `JUDGER_TEMPERATURE` |
 | `eval_top_p` | `0.95` | top-p 采样累计概率阈值 | `JUDGER_TOP_P` |
+| `eval_enable_thinking` | 不设置 | 是否开启评估模型的思考模式（如 Qwen3 的 `enable_thinking`）；`true`/`false` 会通过 `chat_template_kwargs` 显式开关，不设置则跟随模型默认 | `JUDGER_ENABLE_THINKING` |
 | `eval_batch_size` | `10` | 批大小 | `JUDGER_BATCH_SIZE` |
 | `eval_case_num` | `10` | 每条问题样例数 | `JUDGER_CASE_NUM` |
 | `eval_vllm_tensor_parallel_size` | `1` | vLLM 张量并行大小 | `JUDGER_TENSOR_PARALLEL_SIZE` |
