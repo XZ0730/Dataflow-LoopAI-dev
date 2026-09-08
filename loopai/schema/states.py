@@ -449,6 +449,12 @@ class JudgerState(BaseModel):
         description="评估模型每个问题的样例生成数量",
         json_schema_extra={"ui_type": "number", "ui_group": "评估模型"}
     )
+    eval_max_tokens: int = Field(
+        default=16384,
+        title="评估模型最大输出 Token",
+        description="评估模型生成样本时的最大输出 token 数（含思考模式的推理 token）",
+        json_schema_extra={"ui_type": "number", "ui_group": "评估模型"}
+    )
     eval_vllm_tensor_parallel_size: int = Field(
         default=2,
         title="vllm本地启动参数——tensor_parallel_size",
@@ -471,7 +477,7 @@ class JudgerState(BaseModel):
     benchlist: List[Dict[str, Any]] = Field(
         default_factory=list,
         title="主任务评测集",
-        description="主任务评测集列表，每个元素包含 name、task_type、problem_path 等字段",
+        description="主任务评测集列表，每个元素包含 name、task_type、problem_path 等字段；可选覆盖全局生成参数：case_num、batch_size、temperature、top_p、max_tokens、enable_thinking",
         json_schema_extra={"ui_type": "bench_list", "ui_group": "评估模型", "nested_allowed_values": {
             "task_type": ["code", "text2sql", "general_text"],
             "eval_type": ["key2_qa", "key2_q_ma", "key3_q_choices_a", "key3_q_choices_as", "key3_q_a_rejected", "key1_text_score"]
@@ -480,7 +486,7 @@ class JudgerState(BaseModel):
     extra_benchlist: List[Dict[str, Any]] = Field(
         default_factory=list,
         title="附加任务评测集",
-        description="附加任务评测集列表，格式同 benchlist。失败不影响主任务",
+        description="附加任务评测集列表，格式同 benchlist（同样支持 case_num/batch_size/temperature/top_p/max_tokens/enable_thinking 覆盖）。失败不影响主任务",
         json_schema_extra={"ui_type": "bench_list", "ui_group": "评估模型", "nested_allowed_values": {
             "task_type": ["code", "text2sql", "general_text"],
             "eval_type": ["key2_qa", "key2_q_ma", "key3_q_choices_a", "key3_q_choices_as", "key3_q_a_rejected", "key1_text_score"]

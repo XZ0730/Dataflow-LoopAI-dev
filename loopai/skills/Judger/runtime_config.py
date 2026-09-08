@@ -13,6 +13,7 @@ _SCHEMA_DEFAULTS: Dict[str, Any] = {
     "eval_vllm_tensor_parallel_size": 1,
     "eval_vllm_gpu_memory_utilization": 0.9,
     "cuda_visible_devices": "0",
+    "eval_max_tokens": 16384,
 }
 
 
@@ -89,6 +90,11 @@ def resolve_judger_runtime_config(
         os.getenv("JUDGER_ENABLE_THINKING"),
         judger.get("eval_enable_thinking"),
     )
+    max_tokens = _first_non_empty(
+        os.getenv("JUDGER_MAX_TOKENS"),
+        judger.get("eval_max_tokens"),
+        _SCHEMA_DEFAULTS["eval_max_tokens"],
+    )
 
     # --- global ---
     resolved_task_id = _first_non_empty(
@@ -130,6 +136,10 @@ def resolve_judger_runtime_config(
         gpu_memory_utilization = 0.9
     if enable_thinking is not None and not isinstance(enable_thinking, bool):
         enable_thinking = str(enable_thinking).strip().lower() in ("true", "1", "on", "yes")
+    try:
+        max_tokens = int(max_tokens) if max_tokens is not None else 16384
+    except (TypeError, ValueError):
+        max_tokens = 16384
 
     # --- write resolved values back into state ---
     if is_state_dict:
@@ -147,6 +157,7 @@ def resolve_judger_runtime_config(
             ("eval_vllm_gpu_memory_utilization", gpu_memory_utilization),
             ("cuda_visible_devices", cuda_visible_devices),
             ("eval_enable_thinking", enable_thinking),
+            ("eval_max_tokens", max_tokens),
         ):
             if val is not None:
                 state["judger"][key] = val
@@ -166,4 +177,5 @@ def resolve_judger_runtime_config(
         "gpu_memory_utilization": gpu_memory_utilization,
         "cuda_visible_devices": str(cuda_visible_devices),
         "enable_thinking": enable_thinking,
+        "max_tokens": max_tokens,
     }

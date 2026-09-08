@@ -84,7 +84,7 @@ def _build_model_config(cfg: Dict[str, Any]) -> ModelConfig:
         api_key=cfg.get("eval_api_key", "EMPTY"),
         api_extra_body=extra_body,
         temperature=float(cfg.get("eval_temperature", 0.0)),
-        top_p=float(cfg.get("eval_top_p", 1.0)),
+        top_p=float(cfg.get("eval_top_p", 0.95)),
         tensor_parallel_size=int(cfg.get("eval_vllm_tensor_parallel_size", 1)),
         max_tokens=int(cfg.get("eval_max_tokens",16384)),
         gpu_memory_utilization=cfg.get("eval_vllm_gpu_memory_utilization", 0.9),

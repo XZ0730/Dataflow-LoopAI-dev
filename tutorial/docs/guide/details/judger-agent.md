@@ -44,11 +44,46 @@ loopai-judger --from-step generate   # 从指定步骤开始
 | `problem_path` | `str` | `jsonl` 格式的问题集文件路径 |
 | `case_num` | `int` | 每条问题生成样例数（可选，默认取全局 `eval_case_num`） |
 | `batch_size` | `int` | 批大小（可选，默认取全局 `eval_batch_size`） |
+| `temperature` | `float` | 覆盖全局 `eval_temperature`（可选） |
+| `top_p` | `float` | 覆盖全局 `eval_top_p`（可选） |
+| `max_tokens` | `int` | 覆盖全局 `eval_max_tokens`（可选） |
+| `enable_thinking` | `bool` | 覆盖全局 `eval_enable_thinking`（可选，`false` 强制关闭思考） |
 | `text2sql_dir` | `str` | `text2sql` 任务的数据库文件夹（可选） |
 | `eval_type` | `str` | `general_text` 任务的评测类型（可选） |
 | `key_mapping` | `dict` | `general_text` 任务的字段映射（可选） |
 
 `general_text` 支持的 `eval_type`：`key2_qa`、`key2_q_ma`、`key3_q_choices_a`、`key3_q_choices_as`、`key3_q_a_rejected`、`key1_text_score`。
+
+### Per-bench 可选覆盖（特殊测试）
+
+`case_num` / `batch_size` / `temperature` / `top_p` / `max_tokens` / `enable_thinking` 这 6 个字段，**既可以在全局设置，也可以在单个 bench 里单独设置**：
+
+- bench 里设置了 → 覆盖全局值，只对这一个 bench 生效
+- bench 里没设置 → 回落到全局默认
+
+用于「某个评测集需要特殊生成参数」的场景，例如某个 code 评测集想用更低温度、某个 text2sql 评测集要关闭思考模式：
+
+```json
+{
+  "benchlist": [
+    {
+      "name": "human_eval_default",
+      "task_type": "code",
+      "problem_path": "/data/humaneval.jsonl"
+    },
+    {
+      "name": "human_eval_cold",
+      "task_type": "code",
+      "problem_path": "/data/humaneval.jsonl",
+      "temperature": 0.3,
+      "enable_thinking": false,
+      "max_tokens": 4096
+    }
+  ]
+}
+```
+
+上面的 `human_eval_cold` 覆盖了全局的 `eval_temperature` / `eval_enable_thinking` / `eval_max_tokens`，而 `human_eval_default` 用全局默认。
 
 ## 全局配置字段
 
@@ -60,6 +95,7 @@ loopai-judger --from-step generate   # 从指定步骤开始
 | `eval_temperature` | `0` | 模型温度 | `JUDGER_TEMPERATURE` |
 | `eval_top_p` | `0.95` | top-p 采样累计概率阈值 | `JUDGER_TOP_P` |
 | `eval_enable_thinking` | 不设置 | 是否开启评估模型的思考模式（如 Qwen3 的 `enable_thinking`）；`true`/`false` 会通过 `chat_template_kwargs` 显式开关，不设置则跟随模型默认 | `JUDGER_ENABLE_THINKING` |
+| `eval_max_tokens` | `16384` | 最大输出 token 数（含思考模式的推理 token） | `JUDGER_MAX_TOKENS` |
 | `eval_batch_size` | `10` | 批大小 | `JUDGER_BATCH_SIZE` |
 | `eval_case_num` | `10` | 每条问题样例数 | `JUDGER_CASE_NUM` |
 | `eval_vllm_tensor_parallel_size` | `1` | vLLM 张量并行大小 | `JUDGER_TENSOR_PARALLEL_SIZE` |
