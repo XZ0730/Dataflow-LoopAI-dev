@@ -58,17 +58,24 @@ def _ensure_math_eval_image(writer=None) -> None:
     subprocess.run(build_command, check=True)
 
 
-def _resolve_vllm_model_name(configured: str) -> str:
-    """Return the model id advertised by the local vLLM OpenAI endpoint."""
+def _assert_model_is_served(expected: str) -> None:
+    """确认 vLLM 确实按这个名字上架，否则立刻给可读报错。
+
+    模型名由 Judger 与 vLLM 共同约定：runtime_config 决定名字，vllm_starter 用
+    同一个值传 ``--served-model-name``。两边一旦不一致，vLLM 会对*每一条*请求回
+    404，而报错发生在容器内部、还要重试若干次才抛出，极难定位；这里提前拦住。
+    """
     try:
         with urllib.request.urlopen("http://127.0.0.1:8911/v1/models", timeout=5) as response:
             payload = json.loads(response.read().decode("utf-8"))
-        models = payload.get("data") or []
-        if models and models[0].get("id"):
-            return str(models[0]["id"])
     except Exception:
-        pass
-    return configured
+        return  # 查不到就不拦，让真正的调用去暴露问题
+    served = [str(item.get("id")) for item in (payload.get("data") or []) if item.get("id")]
+    if served and expected not in served:
+        raise ValueError(
+            f"eval_model_name={expected!r} 不在 vLLM 上架的名字里：{served}。"
+            f"请检查 eval_model_path / eval_model_name 配置。"
+        )
 
 
 def run_evaluate_math(state: Dict[str, Any], writer=None) -> Dict[str, Any]:
@@ -81,11 +88,12 @@ def run_evaluate_math(state: Dict[str, Any], writer=None) -> Dict[str, Any]:
     image = MATH_EVAL_IMAGE
     # Math always talks to the vLLM instance started by the Judger pipeline.
     base_url = "http://127.0.0.1:8911/v1"
-    model_name = str(judger.get("eval_model_name") or judger.get("eval_model_path") or "")
+    # 名字由 resolve_judger_runtime_config 统一给出（未配置时取模型路径最后一段），
+    # 与 vllm_starter 传给 vLLM 的 --served-model-name 是同一个值，不再靠猜。
+    model_name = str(judger.get("eval_model_name") or "").strip()
     if not model_name:
-        raise ValueError("eval_model_path or eval_model_name is required for math evaluation")
-    if not judger.get("eval_model_name"):
-        model_name = _resolve_vllm_model_name(model_name)
+        raise ValueError("eval_model_name is required for math evaluation")
+    _assert_model_is_served(model_name)
 
     task_id = str(state.get("task_id") or "task")
     bench_name = str(judger.get("bench_name") or dataset_path.stem)

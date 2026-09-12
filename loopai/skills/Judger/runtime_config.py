@@ -99,6 +99,12 @@ def resolve_judger_runtime_config(
         _SCHEMA_DEFAULTS["eval_max_tokens"],
     )
     model_name = _first_non_empty(os.getenv("JUDGER_MODEL_NAME"), judger.get("eval_model_name"))
+    if not model_name and model_path:
+        # vLLM 对外暴露的模型名默认就是 --model 的原值（vllm/config.py
+        # get_served_model_name），而调用方只拿得到模型路径，两边必然对不上，
+        # 请求会被 vLLM 判成 404。所以统一在这里取路径最后一段，
+        # vllm_starter 会用同一个值传 --served-model-name。
+        model_name = os.path.basename(str(model_path).rstrip("/\\")) or None
     problem_path = _first_non_empty(os.getenv("JUDGER_PROBLEM_PATH"), judger.get("eval_problem_path"))
 
     # --- global ---

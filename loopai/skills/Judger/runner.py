@@ -520,6 +520,9 @@ def _step_start_vllm(state: Dict[str, Any], writer) -> Dict[str, Any]:
     tensor_parallel_size = judger.get("eval_vllm_tensor_parallel_size", 1)
     gpu_memory_utilization = judger.get("eval_vllm_gpu_memory_utilization", 0.9)
     model_path = judger.get("eval_model_path")
+    # 与调用方约定的模型名（留空时由 runtime_config 取路径最后一段），
+    # 必须传给 vLLM，否则它会把整条路径当成对外模型名。
+    served_model_name = judger.get("eval_model_name")
 
     if not model_path:
         emit_error(
@@ -529,11 +532,25 @@ def _step_start_vllm(state: Dict[str, Any], writer) -> Dict[str, Any]:
             message="Missing eval_model_path for vLLM startup.",
         )
 
+    # vLLM 的 stdout 走管道，Judger 一退出就再也读不到（进程崩没崩、有没有 OOM
+    # 都查不到），所以同时落盘一份到本次运行的输出目录。
+    vllm_log_path = (
+        Path(str(state.get("output_dir") or "./outputs")).expanduser().resolve()
+        / str(state.get("task_id") or "task")
+        / "judger"
+        / str(getattr(writer, "version_id", None) or "run")
+        / "vllm.log"
+    )
+
     writer(StreamEvent(
         current=state.get("current"), progress=0.0, message="正在启动本地 vLLM 服务",
-        data={"model_path": model_path, "tensor_parallel_size": tensor_parallel_size}))
+        data={"model_path": model_path, "served_model_name": served_model_name,
+              "tensor_parallel_size": tensor_parallel_size,
+              "vllm_log_path": str(vllm_log_path)}))
     try:
-        start_vllm_openai_api_server(tensor_parallel_size, gpu_memory_utilization, model_path)
+        start_vllm_openai_api_server(
+            tensor_parallel_size, gpu_memory_utilization, model_path,
+            vllm_served_model_name=served_model_name, log_path=vllm_log_path)
     except Exception as exc:
         logger.exception(f"[Judger] vLLM 启动失败")
         emit_error(
