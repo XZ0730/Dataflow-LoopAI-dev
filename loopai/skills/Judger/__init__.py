@@ -39,7 +39,7 @@ def run(
     # 提前读 state 获取 output_dir，建 writer
     if state is None:
         state = _load_task_state(task_id)
-    output_dir = state.get("output_dir", "./outputs")
+    output_dir = os.getenv("OUTPUT_DIR") or state.get("output_dir", "./outputs")
 
     # resume 时读取上次运行的 version_id，复用输出目录
     version_id = None

@@ -2,11 +2,12 @@
 
 ## Purpose
 
-无 LangGraph 的独立评测流水线。支持三种任务类型：
+无 LangGraph 的独立评测流水线。支持四种任务类型：
 
 - **code** — 代码生成评测（human-eval / mbpp），计算 pass@k
 - **text2sql** — SQL 生成评测，SQLite 执行校验
 - **general_text** — 通用文本评测（One-Eval DataFlowEvalTool）
+- **math** — 数学/AIME 评测（生成、答案提取和判分在 Docker 镜像内完成）
 
 ## How to Invoke
 
@@ -24,6 +25,32 @@ python -c "from loopai.skills.Judger import run; run()"
 ```bash
 DB_PATH=api/db/db.sqlite3 TASK_ID=<task_id> loopai-judger
 ```
+
+math 可使用 helper 一次完成配置注入和 CLI 启动：
+
+```bash
+conda activate loopai
+DB_PATH=api/db/api.db TASK_ID=aime26-eval \
+python examples/scripts/run_math_judger.py \
+  --config-path examples/config/math_bench.json
+```
+
+仅注入配置时使用 `--inject-only`；断点恢复和指定起始步骤分别使用
+`--resume`、`--from-step evaluate_math`。
+
+推荐使用 shell 入口（Configer 和 Judger 均通过 CLI）：
+
+```bash
+conda activate loopai
+export DB_PATH=api/db/api.db
+export TASK_ID=aime26-eval
+bash examples/scripts/run_math_judger.sh examples/config/math_bench.json
+```
+
+该脚本先调用 `loopai-configer update-task` 写入 `judger` 配置，再调用
+`loopai-judger` 启动评测。首次修改 `setup.py` 后需重新安装项目以生成
+`loopai-configer` 命令；开发环境也可将脚本中的命令替换为
+`python -m loopai.skills.Configer.cli` 和 `python -m loopai.skills.Judger.cli`。
 
 ## Configuration
 
@@ -44,6 +71,8 @@ DB_PATH=api/db/db.sqlite3 TASK_ID=<task_id> loopai-judger
 | `eval_vllm_gpu_memory_utilization` | `0.9` | vLLM GPU 显存利用率 |
 | `cuda_visible_devices` | `"0"` | 指定 GPU |
 | `output_dir` | `"./outputs"` | 输出根目录 |
+| `eval_model_name` | 空 | `/v1/models` 暴露的模型名；留空使用 `eval_model_path` |
+| `eval_top_k` / `eval_min_p` | `-1` / `0` | math 请求采样参数 |
 
 ### Bench 配置（state["judger"]）
 
@@ -78,6 +107,12 @@ DB_PATH=api/db/db.sqlite3 TASK_ID=<task_id> loopai-judger
       "text2sql_dir": "/data/bird/dev_databases",
       "case_num": 10,
       "batch_size": 10
+    },
+    {
+      "name": "aime26",
+      "task_type": "math",
+      "problem_path": "/data/aime26_test.jsonl",
+      "case_num": 2
     }
   ],
   "extra_benchlist": []
@@ -86,17 +121,17 @@ DB_PATH=api/db/db.sqlite3 TASK_ID=<task_id> loopai-judger
 
 **bench entry 字段：**
 
-| 字段 | code | text2sql | general_text | 说明 |
-|---|---|---|---|---|
-| `name` | ✅ 必填 | ✅ 必填 | ✅ 必填 | bench 标识 |
-| `task_type` | ✅ 必填 | ✅ 必填 | ✅ 必填 | `code` / `text2sql` / `general_text` |
-| `problem_path` | ✅ 必填 | ✅ 必填 | ✅ 必填 | 问题文件路径 |
-| `case_num` | 可选 10 | 可选 10 | — | 每问题样本数，bench 设了覆盖全局 |
-| `batch_size` | 可选 10 | 可选 10 | — | 批处理大小，bench 设了覆盖全局 |
-| `temperature` | 可选 | 可选 | 可选 | 覆盖全局 `eval_temperature` |
-| `top_p` | 可选 | 可选 | 可选 | 覆盖全局 `eval_top_p` |
-| `max_tokens` | 可选 | 可选 | 可选 | 覆盖全局 `eval_max_tokens` |
-| `enable_thinking` | 可选 | 可选 | 可选 | 覆盖全局 `eval_enable_thinking`，`false` 强制关闭思考 |
+| 字段 | code | text2sql | general_text | math | 说明 |
+|---|---|---|---|---|---|
+| `name` | ✅ 必填 | ✅ 必填 | ✅ 必填 | ✅ 必填 | bench 标识 |
+| `task_type` | ✅ 必填 | ✅ 必填 | ✅ 必填 | ✅ 必填 | `code` / `text2sql` / `general_text` / `math` |
+| `problem_path` | ✅ 必填 | ✅ 必填 | ✅ 必填 | ✅ 必填 | 问题文件路径 |
+| `case_num` | 可选 10 | 可选 10 | — | 可选 10 | 每问题样本数；math 同时作为 val_n |
+| `batch_size` | 可选 10 | 可选 10 | — | — | 批处理大小，bench 设了覆盖全局 |
+| `temperature` | 可选 | 可选 | 可选 | 可选 | 覆盖全局 `eval_temperature` |
+| `top_p` | 可选 | 可选 | 可选 | 可选 | 覆盖全局 `eval_top_p` |
+| `max_tokens` | 可选 | 可选 | 可选 | 可选 | 覆盖全局 `eval_max_tokens` |
+| `enable_thinking` | 可选 | 可选 | 可选 | 可选 | 覆盖全局 `eval_enable_thinking`，`false` 强制关闭思考 |
 | `format_type` | 可选 | — | — | `human-eval` / `mbpp`，不设走默认 |
 | `text2sql_dir` | — | ✅ 必填 | — | SQLite 数据库目录 |
 | `eval_type` | — | — | ✅ 必填 | `key2_qa` / `key1_text_score` 等 |
@@ -150,6 +185,7 @@ DB_PATH=api/db/db.sqlite3 TASK_ID=<task_id> loopai-judger
   → 按 task_type 选流水线:
     code/text2sql: validate → kill_vllm → start_vllm → format_data → generate → evaluate → kill_vllm_cleanup → finish
     general_text:  validate → eval_general_text → finish
+    math:          validate → kill_vllm → start_vllm → evaluate_math (Docker) → kill_vllm_cleanup → finish
   → 收集结果到 bench_result / extra_bench_result
 ```
 
@@ -194,6 +230,51 @@ outputs/<task_id>/
 ### Configer 持久化
 
 `_save_task_progress` 写入 `state.judger.bench_result` 和 `state.judger.extra_bench_result`，Analyzer 从中读取。
+
+`math` 分支的数学评测逻辑由固定名称 `math-eval-loopai` 镜像提供。Judger
+运行 `evaluate_math` 步骤时会先检查本地镜像；不存在则自动从
+`loopai/skills/Judger/docker/math_eval` 构建（使用 `--network host`），无需手工
+构建。运行时数据集只读挂载到容器，结果目录挂载到 `/outputs`；容器通过 host
+network 访问 Judger 启动的 8911 vLLM 服务，不挂载宿主机 Conda 环境。
+
+数学数据集必须是本地 JSON、JSONL 或 Parquet 文件。评测器自动将以下字段别名
+归一化为 `problem` 和 `answer`：问题支持 `problem/question/prompt/query/input`，
+答案支持 `answer/target/final_answer/solution`，因此不需要传入 `dataset` 类型参数。
+
+### CLI 参数覆盖
+
+安装项目后可直接使用 `loopai-judger`。默认从数据库任务读取配置；命令行参数
+仅覆盖本次运行，不修改数据库：
+
+```bash
+DB_PATH=/path/to/api/db.sqlite3 \
+loopai-judger \
+  --task-id math-aime26-20260911-192302-ebdf0ac3 \
+  --model-path /path/to/model \
+  --dataset-path /path/to/aime26_test.jsonl \
+  --cuda-visible-devices 4 \
+  --case-num 2 \
+  --max-tokens 38912
+```
+
+如果传入 `--config-path`，则配置文件会先覆盖并保存到指定任务的数据库状态，
+然后再执行评测：
+
+```bash
+DB_PATH=/path/to/api/db.sqlite3 \
+loopai-judger \
+  --task-id math-aime26-20260911-192302-ebdf0ac3 \
+  --config-path examples/config/math_bench.json
+```
+
+配置文件支持 `.json`、`.yaml`、`.yml`，内容可使用 `judger` 或
+`default_states.judger` 结构。`task_id` 可从命令行、环境变量或配置文件读取，
+优先级依次为命令行、环境变量、配置文件。
+
+支持的覆盖项包括 `--temperature`、`--top-p`、`--top-k`、`--min-p`、
+`--presence-penalty`、`--batch-size`、`--tensor-parallel-size`、
+`--gpu-memory-utilization`、`--enable-thinking`/`--no-thinking` 和
+`--output-dir`。`--resume` 与 `--from-step` 仍用于断点控制。
 
 ## Error Handling
 

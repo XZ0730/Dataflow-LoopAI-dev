@@ -28,6 +28,7 @@ JUDGER_PIPELINE_STEPS = (
     "evaluate",            # 评测样本并计算 pass@k
     "kill_vllm_cleanup",   # 评测完成后关闭 vLLM
     "eval_general_text",   # 通用文本评测（One-Eval DataFlow）
+    "evaluate_math",       # 数学评测 Docker runner
     "finish",              # 流水线结束
 )
 
@@ -42,6 +43,8 @@ _STEP_ALIASES = {
     "generate_code": "generate",
     "evaluate_node": "evaluate",
     "eval_general_text_node": "eval_general_text",
+    "eval_math": "evaluate_math",
+    "evaluate_math_node": "evaluate_math",
     "vllm_kill_node": "kill_vllm_cleanup",
     "finish_node": "finish",
 }
@@ -62,6 +65,15 @@ _CODE_TEXTSQL_STEPS = (
 _GENERAL_TEXT_STEPS = (
     "validate",
     "eval_general_text",
+    "finish",
+)
+
+_MATH_STEPS = (
+    "validate",
+    "kill_vllm",
+    "start_vllm",
+    "evaluate_math",
+    "kill_vllm_cleanup",
     "finish",
 )
 
@@ -127,6 +139,7 @@ def _load_task_state(task_id: str) -> Dict[str, Any]:
             "样本生成完成": "generate",
             "评测完成": "evaluate",
             "通用文本评测完成": "eval_general_text",
+            "数学评测完成": "evaluate_math",
             "流水线完成": "finish",
         }
         try:
@@ -189,7 +202,12 @@ def _resume_step_from_state(state: Dict[str, Any]) -> str:
     last_completed = normalize_judger_step(state.get("last_completed"))
 
     task_type = (state.get("judger") or {}).get("eval_task_type", "code")
-    steps = _GENERAL_TEXT_STEPS if task_type == "general_text" else _CODE_TEXTSQL_STEPS
+    if task_type == "general_text":
+        steps = _GENERAL_TEXT_STEPS
+    elif task_type == "math":
+        steps = _MATH_STEPS
+    else:
+        steps = _CODE_TEXTSQL_STEPS
 
     if last_completed and last_completed in steps and last_completed != "finish":
         next_index = min(_start_index(last_completed, steps) + 1, len(steps) - 1)
@@ -265,6 +283,20 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
         missing = get_missing_fields({"judger": ["eval_text2sql_dir"]}, state)
     if not missing and task_type == "general_text":
         missing = get_missing_fields({"judger": ["bench_dataflow_eval_type"]}, state)
+    if not missing and task_type == "math":
+        checks = (
+            ("eval_case_num", lambda value: int(value) > 0),
+            ("eval_max_tokens", lambda value: int(value) > 0),
+            ("eval_temperature", lambda value: float(value) >= 0),
+            ("eval_top_p", lambda value: 0 < float(value) <= 1),
+        )
+        for key, predicate in checks:
+            try:
+                valid = predicate(judger.get(key))
+            except (TypeError, ValueError):
+                valid = False
+            if not valid:
+                missing.setdefault("judger", []).append(key)
 
     # 4. 问题文件存在性
     problem_path = judger.get("eval_problem_path", "")
@@ -308,6 +340,53 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
                 code=ErrorCode.INVALID_INPUT, recoverable=True,
                 stream_writer=writer,
                 message=f"Problem file {problem_path} has invalid fields for task type {task_type}.",
+            )
+    elif task_type == "math":
+        # AIME exports use problem/answer; MATH-style exports commonly use
+        # question/target or problem/solution. Validate aliases per row.
+        try:
+            suffix = os.path.splitext(problem_path)[1].lower()
+            if suffix == ".parquet":
+                import pyarrow.parquet as pq
+                columns = {name.lower() for name in pq.read_schema(problem_path).names}
+                rows = None
+            elif suffix in {".json", ".jsonl"}:
+                with open(problem_path, "r", encoding="utf-8") as handle:
+                    if suffix == ".json":
+                        payload = json.load(handle)
+                        if isinstance(payload, list):
+                            rows = payload
+                        elif isinstance(payload, dict) and isinstance(payload.get("data"), list):
+                            rows = payload["data"]
+                        elif isinstance(payload, dict):
+                            rows = [payload]
+                        else:
+                            raise ValueError("JSON dataset must be an array of objects")
+                    else:
+                        rows = (json.loads(line) for line in handle if line.strip())
+                columns = None
+            else:
+                raise ValueError(f"unsupported math dataset file type: {suffix}")
+
+            if columns is not None:
+                if not columns.intersection({"problem", "question", "prompt", "query", "input"}):
+                    raise ValueError("dataset is missing problem/question/prompt/query/input")
+                if not columns.intersection({"answer", "target", "final_answer", "solution"}):
+                    raise ValueError("dataset is missing answer/target/final_answer/solution")
+            else:
+                for row_no, row in enumerate(rows, 1):
+                    if not isinstance(row, dict):
+                        raise ValueError(f"row {row_no} is not a JSON object")
+                    row_keys = {str(key).lower() for key in row}
+                    if not row_keys.intersection({"problem", "question", "prompt", "query", "input"}):
+                        raise ValueError(f"row {row_no} is missing problem/question/prompt/query/input")
+                    if not row_keys.intersection({"answer", "target", "final_answer", "solution"}):
+                        raise ValueError(f"row {row_no} is missing answer/target/final_answer/solution")
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            emit_error(
+                exc, code=ErrorCode.INVALID_INPUT, recoverable=True,
+                stream_writer=writer,
+                message=f"Problem file {problem_path} has invalid math JSONL fields.",
             )
 
     writer(StreamEvent(
@@ -478,6 +557,16 @@ def _step_eval_general_text(state: Dict[str, Any], writer) -> Dict[str, Any]:
     return run_eval_general_text(state, writer)
 
 
+def _step_evaluate_math(state: Dict[str, Any], writer) -> Dict[str, Any]:
+    """Run the math evaluator container and publish its metrics."""
+    from loopai.skills.Judger.utils.evaluate_math import run_evaluate_math
+
+    result = run_evaluate_math(state, writer)
+    state["judger"]["output_result_path"] = result.get("result_path", "")
+    state["judger"]["metrics"] = result.get("metrics", {})
+    return state
+
+
 def _run_step(step_name: str, state: Dict[str, Any], writer) -> Dict[str, Any]:
     """分发执行单个流水线步骤。异常先写事件流再抛，确保错误不丢失。"""
     step = normalize_judger_step(step_name)
@@ -490,6 +579,7 @@ def _run_step(step_name: str, state: Dict[str, Any], writer) -> Dict[str, Any]:
         "evaluate": _step_evaluate,
         "kill_vllm_cleanup": _step_kill_vllm,
         "eval_general_text": _step_eval_general_text,
+        "evaluate_math": _step_evaluate_math,
     }
     if step in dispatch:
         return dispatch[step](state, writer)
@@ -512,6 +602,10 @@ _BENCH_OVERRIDE_MAP = {
     "top_p": "eval_top_p",
     "max_tokens": "eval_max_tokens",
     "enable_thinking": "eval_enable_thinking",
+    "top_k": "eval_top_k",
+    "min_p": "eval_min_p",
+    "presence_penalty": "eval_presence_penalty",
+    "model": "eval_model_name",
 }
 
 
@@ -550,7 +644,6 @@ def _apply_bench_to_state(state: Dict[str, Any], bench: Dict[str, Any]) -> None:
         judger["bench_dataflow_eval_type"] = bench["eval_type"]
     if bench.get("key_mapping"):
         judger["key_mapping"] = bench["key_mapping"]
-
     # 5. 可选覆盖字段（bench 里设置则覆盖全局，未设置保持全局默认）
     for bench_key, judger_key in _BENCH_OVERRIDE_MAP.items():
         if bench_key in bench and bench[bench_key] is not None:
@@ -568,6 +661,8 @@ def _run_single_bench(
     task_type = bench["task_type"]
     if task_type == "general_text":
         steps = _GENERAL_TEXT_STEPS
+    elif task_type == "math":
+        steps = _MATH_STEPS
     else:
         steps = _CODE_TEXTSQL_STEPS
 
@@ -598,6 +693,14 @@ def _run_single_bench(
             "meta": bench_data.get("meta", {}),
             "key_mapping": bench_data.get("key_mapping", {}),
             "metrics": (bench_data.get("meta", {})).get("eval_result", {}),
+        }
+    elif task_type == "math":
+        result = {
+            "bench_name": bench_name,
+            "task_type": task_type,
+            "output_result_path": judger.get("output_result_path", ""),
+            "metrics": judger.get("metrics", {}),
+            "eval_status": "success",
         }
     else:
         result = {
@@ -630,7 +733,7 @@ def run_judger_pipeline(
 ) -> Dict[str, Any]:
     """执行 Judger 独立函数流水线（无需 LangGraph）。
 
-    根据 task_type 自动选择流水线路径（code/text2sql 或 general_text）。
+    根据 task_type 自动选择流水线路径（code/text2sql、general_text 或 math）。
 
     事件通过 ``loopai.common.event_tool.get_event_writer`` 持久化到
     ``<output_dir>/<task_id>/judger.pkl``，事后可用 ``load_events()`` 读取。
