@@ -240,6 +240,92 @@ def _find_best_checkpoint(
     )
 
 
+# 支持的评测任务类型。bench 的 task_type 必须显式命中其中之一，否则会静默
+# 落到 code 分支（见 _apply_bench_to_state 的默认值），拿错的数据集评测却不报错。
+# 同步维护：loopai/schema/states.py 里 benchlist / extra_benchlist 的
+# nested_allowed_values["task_type"]（那是配置 UI 用的元数据，不适合当运行时白名单）。
+_JUDGER_TASK_TYPES = ("code", "text2sql", "general_text", "math")
+
+# 每个 bench entry 的必填字段。
+_BENCH_REQUIRED_FIELDS = ("name", "task_type", "problem_path")
+
+# 特定 task_type 额外需要的 bench 字段。
+_BENCH_TASK_TYPE_REQUIRED_FIELDS = {
+    "text2sql": ("text2sql_dir",),
+    "general_text": ("eval_type",),
+}
+
+
+def _bench_label(bench: Any, group: str, index: int) -> str:
+    """生成便于定位的 bench 标签，例如 ``benchlist[0] aime26``。"""
+    name = bench.get("name") if isinstance(bench, dict) else None
+    return f"{group}[{index}]" + (f" {name}" if name else "")
+
+
+def _collect_bench_problems(
+    bench: Any, label: str = "bench", *, check_problem_path: bool = False
+) -> List[str]:
+    """收集单个 bench entry 的配置问题，不抛错，便于一次性汇总所有 bench。"""
+    if not isinstance(bench, dict):
+        return [f"{label}: 应为 JSON 对象，实际是 {type(bench).__name__}"]
+
+    problems: List[str] = []
+    for field in _BENCH_REQUIRED_FIELDS:
+        value = bench.get(field)
+        if value is None or (isinstance(value, str) and not value.strip()):
+            problems.append(f"{label}: 缺少必填字段 {field}")
+
+    task_type = bench.get("task_type")
+    if isinstance(task_type, str) and task_type.strip() and task_type not in _JUDGER_TASK_TYPES:
+        problems.append(
+            f"{label}: 未知 task_type {task_type!r}，可选值: {', '.join(_JUDGER_TASK_TYPES)}")
+
+    for field in _BENCH_TASK_TYPE_REQUIRED_FIELDS.get(task_type, ()):
+        if not bench.get(field):
+            problems.append(f"{label}: task_type={task_type} 需要字段 {field}")
+
+    # 与 _step_validate 的落地检查保持一致：都用原始路径，不额外展开 ~，
+    # 否则预检放行而 validate 失败，反而更难排查。
+    problem_path = bench.get("problem_path")
+    if check_problem_path and isinstance(problem_path, str) and problem_path.strip():
+        if not os.path.exists(problem_path):
+            problems.append(f"{label}: problem_path 不存在: {problem_path}")
+
+    return problems
+
+
+def _emit_bench_config_error(problems: List[str], writer, message: str) -> None:
+    """bench 配置错误的统一出口，避免 code / recoverable 在多处漂移。"""
+    emit_error(
+        ValueError("; ".join(problems)),
+        code=ErrorCode.CONFIG_ERROR, recoverable=True,
+        stream_writer=writer, message=message,
+    )
+
+
+def _validate_bench(bench: Any, writer=None) -> None:
+    """校验单个 bench entry 的结构；有问题时 emit_error（会退出进程）。"""
+    problems = _collect_bench_problems(bench)
+    if problems:
+        _emit_bench_config_error(problems, writer, "评测集配置有误，请修正后重试。")
+
+
+def _preflight_benches(benches: Any, group: str) -> Tuple[List[Any], List[str]]:
+    """按组校验 bench entry，返回 (通过的 bench, 问题列表)。
+
+    连数据文件是否存在一起校验，让配置问题在启动任何 vLLM 之前全部暴露。
+    """
+    usable: List[Any] = []
+    problems: List[str] = []
+    for index, bench in enumerate(benches):
+        found = _collect_bench_problems(
+            bench, _bench_label(bench, group, index), check_problem_path=True)
+        problems.extend(found)
+        if not found:
+            usable.append(bench)
+    return usable, problems
+
+
 def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
     """验证步骤：检查必填字段、文件存在性和 JSONL 字段结构。"""
     from loopai.schema.states import get_missing_fields
@@ -251,9 +337,12 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
         current=state.get("current"), progress=0.0, message="开始校验配置参数"))
 
     # 1. 检查通用必填字段
+    # eval_problem_path 不在这里：它是 bench.problem_path 的派生字段（见
+    # _apply_bench_to_state），无论 bench 有没有配都会拿到一个值（哪怕是空串），
+    # 放进必填里查不到任何东西。它的落地检查放在步骤 4，由 bench 结构预检兜底。
     required_fields = {
         "judger": [
-            "eval_temperature", "eval_top_p", "eval_problem_path",
+            "eval_temperature", "eval_top_p",
             "eval_case_num", "eval_task_type",
         ],
         "default": ["output_dir", "task_id"],
@@ -278,11 +367,10 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
             else:
                 missing.setdefault("judger", []).append("eval_model_path")
 
-    # 3. 特定任务类型额外字段
-    if not missing and task_type == "text2sql":
-        missing = get_missing_fields({"judger": ["eval_text2sql_dir"]}, state)
-    if not missing and task_type == "general_text":
-        missing = get_missing_fields({"judger": ["bench_dataflow_eval_type"]}, state)
+    # 3. 特定任务类型的额外检查
+    # text2sql 的 text2sql_dir / general_text 的 eval_type 已由 bench 预检
+    # （_preflight_benches）按 bench entry 校验，且规则更强（空串也算缺失），
+    # 这里不再重复一份。
     if not missing and task_type == "math":
         checks = (
             ("eval_case_num", lambda value: int(value) > 0),
@@ -298,9 +386,9 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
             if not valid:
                 missing.setdefault("judger", []).append(key)
 
-    # 4. 问题文件存在性
+    # 4. 问题文件：未配置与文件不存在分开报，避免「缺字段」掩盖真正原因
     problem_path = judger.get("eval_problem_path", "")
-    if not problem_path or not os.path.exists(problem_path):
+    if not problem_path:
         missing.setdefault("judger", []).append("eval_problem_path")
 
     if missing:
@@ -310,6 +398,16 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
             code=ErrorCode.CONFIG_ERROR, recoverable=True,
             message="Judger configuration is incomplete.",
             stream_writer=writer,
+        )
+
+    if not os.path.exists(problem_path):
+        bench_name = judger.get("bench_name", "")
+        prefix = f"评测集 {bench_name} 的" if bench_name else ""
+        emit_error(
+            FileNotFoundError(f"Problem file does not exist: {problem_path}"),
+            code=ErrorCode.INVALID_INPUT, recoverable=True,
+            stream_writer=writer,
+            message=f"{prefix}problem_path 不存在: {problem_path}",
         )
 
     # 5. JSONL 字段校验
@@ -363,7 +461,8 @@ def _step_validate(state: Dict[str, Any], writer) -> Dict[str, Any]:
                         else:
                             raise ValueError("JSON dataset must be an array of objects")
                     else:
-                        rows = (json.loads(line) for line in handle if line.strip())
+                        # 必须立即求值：惰性生成器会在 with 退出、文件关闭后才被迭代
+                        rows = [json.loads(line) for line in handle if line.strip()]
                 columns = None
             else:
                 raise ValueError(f"unsupported math dataset file type: {suffix}")
@@ -806,32 +905,59 @@ def run_judger_pipeline(
 
     judger_cfg = state.get("judger") or {}
 
-    def _parse_benchlist(val):
-        """textarea 可能返回 JSON 字符串（单行或多行），转为 list。"""
-        if isinstance(val, str):
-            # 尝试整体解析
-            try:
-                parsed = json.loads(val)
-                if isinstance(parsed, list):
-                    return parsed
-            except (json.JSONDecodeError, ValueError):
-                pass
-            # 尝试按行解析（每行一个 JSON 对象）
-            items = []
-            for line in val.strip().split("\n"):
-                line = line.strip()
-                if line:
-                    try:
-                        items.append(json.loads(line))
-                    except (json.JSONDecodeError, ValueError):
-                        pass
-            if items:
-                return items
-            return []
-        return val if isinstance(val, list) else []
+    def _parse_benchlist(val, field_name):
+        """将 textarea 传来的 JSON 字符串（整体数组或每行一个对象）解析为 list。
 
-    benchlist = _parse_benchlist(judger_cfg.get("benchlist")) or []
-    extra_benchlist = _parse_benchlist(judger_cfg.get("extra_benchlist")) or []
+        解析失败一律报错：静默丢弃会让配错的行直接消失，最终表现为
+        「少跑了一个 bench」这种很难排查的问题。
+        """
+        def fail(technical: str, user_message: str) -> None:
+            emit_error(
+                ValueError(technical),
+                code=ErrorCode.CONFIG_ERROR, recoverable=True,
+                stream_writer=writer, message=user_message,
+            )
+
+        if val is None:
+            return []
+        if isinstance(val, list):
+            return val
+        if not isinstance(val, str):
+            fail(f"{field_name} must be a JSON array, got {type(val).__name__}",
+                 f"{field_name} 格式错误：应为 JSON 数组。")
+
+        text = val.strip()
+        if not text:
+            return []
+
+        try:
+            parsed = json.loads(text)
+        except (json.JSONDecodeError, ValueError):
+            parsed = None
+
+        if isinstance(parsed, list):
+            return parsed
+        if isinstance(parsed, dict):
+            fail(f"{field_name} must be a JSON array, got a JSON object",
+                 f"{field_name} 格式错误：应为 JSON 数组（[{{...}}]），而不是单个对象。")
+
+        # 整体解析失败 → 按行解析（每行一个 JSON 对象）；解析失败的行要报出来
+        items: List[Any] = []
+        failures: List[str] = []
+        for lineno, line in enumerate(text.split("\n"), 1):
+            if not line.strip():
+                continue
+            try:
+                items.append(json.loads(line))
+            except (json.JSONDecodeError, ValueError) as exc:
+                failures.append(f"第 {lineno} 行 ({exc})")
+        if failures:
+            fail(f"{field_name} has unparsable lines: " + "; ".join(failures),
+                 f"{field_name} 有 {len(failures)} 行无法解析为 JSON，请检查格式。")
+        return items
+
+    benchlist = _parse_benchlist(judger_cfg.get("benchlist"), "benchlist")
+    extra_benchlist = _parse_benchlist(judger_cfg.get("extra_benchlist"), "extra_benchlist")
 
     if not benchlist and not extra_benchlist:
         emit_error(
@@ -840,6 +966,24 @@ def run_judger_pipeline(
             stream_writer=writer,
             message="Both benchlist and extra_benchlist are empty. Please configure at least one bench.",
         )
+
+    # Bench 预检：在启动任何 vLLM 之前一次性发现所有配置问题，避免跑到第 N 个
+    # bench 才发现配错（每个 bench 都要起一次 vLLM 并生成，代价很高）。
+    # 主任务配置有误直接失败；附加任务按「失败只记录、不影响主任务」的既有约定，
+    # 降级为告警并跳过该 bench。
+    _, primary_problems = _preflight_benches(benchlist, "benchlist")
+    if primary_problems:
+        _emit_bench_config_error(
+            primary_problems, writer, "主任务评测集配置有误，请修正后重试。")
+
+    usable_extra, extra_problems = _preflight_benches(extra_benchlist, "extra_benchlist")
+    if extra_problems:
+        logger.warning(f"[Judger] 跳过配置有误的附加评测集: {extra_problems}")
+        writer(StreamEvent(
+            current="judger", progress=0.0,
+            message=f"跳过配置有误的附加评测集: {'; '.join(extra_problems)}",
+            data={"problems": extra_problems}))
+        extra_benchlist = usable_extra
 
     writer(StreamEvent(
         current="judger", progress=0.0, message="Judger pipeline started",
